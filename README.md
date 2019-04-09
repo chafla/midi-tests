@@ -1,6 +1,5 @@
 # Midi Tests
 
-General tests in reading (and possibly) writing midis.
+General tests in reading (and possibly) writing midis using C.
 
-This repo is really just for experimenting,
-and as a result will likely be all over the place.
+Avert your eyes! I'm really just throwing some stuff around for now, so there isn't likely to be too much in the sense of cleanliness.
