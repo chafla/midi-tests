@@ -3,8 +3,9 @@
 #include <string.h>
 
 struct HeaderChunk {
-    short n_tracks;
-    short division;
+    int format;
+    int n_tracks;
+    int division;
 };
 
 enum EventType{midi, meta, sysex};
@@ -51,7 +52,7 @@ void read_track_events(FILE *file, struct Track *track) {
     }
 
     // get the number of bytes contained by data segment
-    fread(&data_length, sizeof(int), 1, file);
+    fread(&data_length, sizeof(int), 1, file);  // 4 bytes
 
     // here's where the fun begins
     // we need to run through data_length bytes and extract events
@@ -115,11 +116,15 @@ struct Track *create_track(int id) {
     return new_track;
 }
 
+// TODO MIDI IS BIG ENDIAN
+// this means that we'll need to perform a swap every time we try to read in a value
+
 /// read in a header chunk
 struct HeaderChunk *read_header_chunk(FILE *file) {
     // create a struct
     struct HeaderChunk *chunk = calloc(1, sizeof(struct HeaderChunk));
     char chunk_type[5];
+    int chunk_len;
     // skip over the chunk type
     fread(chunk_type, sizeof(char), 4, file);
     chunk_type[4] = '\0';
@@ -129,15 +134,21 @@ struct HeaderChunk *read_header_chunk(FILE *file) {
     }
     printf("Chunk type: %s\n", chunk_type);
 
+    // skip the chunk length, this is guaranteed to be 6
+    fread(&chunk_len, sizeof(int), 1, file);
+
     // it's just 6 bytes
 
-    // skip format
-    fseek(file, 2, SEEK_CUR);
+    // get midi file format
+    fread(&chunk->format, sizeof(char), 2, file);
 
-    fread(&(chunk->n_tracks), 2, 1, file);
-    fread(&(chunk->division), 2, 1, file);
+    fread(&(chunk->n_tracks), sizeof(char), 2, file);
+    fread(&(chunk->division), sizeof(char), 2, file);
     // skip
-    fseek(file, sizeof(char) * 4, SEEK_CUR);
+//    fseek(file, sizeof(char) * 4, SEEK_CUR);
+
+    printf("Header information: n_tracks: %#x, division: %#x, format: %#x\n",
+            chunk->n_tracks, chunk->division, chunk->format);
 
     return chunk;
 
