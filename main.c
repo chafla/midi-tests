@@ -1,11 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <byteswap.h>
 
 struct HeaderChunk {
     int format;
-    int n_tracks;
-    int division;
+    unsigned short n_tracks;
+    unsigned short division;
 };
 
 enum EventType{midi, meta, sysex};
@@ -13,8 +14,10 @@ enum EventType{midi, meta, sysex};
 struct TrackEvent {
     unsigned long td;  /// Timedelta offset before the current event
     enum EventType event_type;
-    int status;
-    int data_bytes[2];  /// Data of the message - one or two bytes
+    unsigned short status;
+    unsigned short event_code;
+    char* data;  /// Data of the message - represented in bytes
+    unsigned int data_len;
 };
 
 struct Track {
@@ -23,7 +26,59 @@ struct Track {
     struct TrackEvent **events;
 };
 
-// TODO will need to track meta events too
+/// Read a big endian short and swap it
+void read_short(unsigned short *ptr, size_t size, size_t n, FILE *file) {
+
+    fread(ptr, size, n, file);
+    *ptr = __builtin_bswap16(*ptr);
+
+}
+
+void read_uint32(unsigned int *ptr, size_t size, size_t n, FILE *file) {
+
+    fread(ptr, size, n, file);
+    *ptr = __builtin_bswap32(*ptr);
+
+}
+
+void read_long(unsigned long *ptr, size_t size, size_t n, FILE *file) {
+
+    fread(ptr, size, n, file);
+    *ptr = __builtin_bswap64(*ptr);
+
+}
+
+unsigned long read_vlv(FILE *file, int *bytes_read) {
+    unsigned int read_buf = 0;
+    unsigned long timedelta = 0;
+    int *bytes_counter;
+
+    // failsafe, we'll just discard the value in this case
+    if (bytes_read == NULL) {
+        int tmp;
+        bytes_counter = &tmp;
+    }
+    else {
+        bytes_counter = bytes_read;
+    }
+
+
+    do {
+
+        *bytes_counter += fread(&read_buf, sizeof(char), 1, file);
+
+        // thanks http://www.ccarh.org/courses/253/handout/vlv/
+
+        timedelta <<= 7u;  // ignore the extra bit at the top of the value
+        timedelta |= read_buf & 0x7Fu;
+
+
+
+        // Keep reading until we've read a 0 as the msb
+    } while (read_buf & 0x80u);
+
+    return timedelta;
+}
 
 /**
  * Read in a track event and add it to its corresponding track
@@ -40,7 +95,8 @@ void read_track_events(FILE *file, struct Track *track) {
     unsigned long timedelta;
     unsigned int read_buf;
 
-    struct TrackEvent *event = calloc(1, sizeof(struct TrackEvent));
+    struct TrackEvent *event = NULL;
+    struct TrackEvent **track_events;
 
     // parse header
     fread(chunk_type, sizeof(char), 4, file);
@@ -52,12 +108,21 @@ void read_track_events(FILE *file, struct Track *track) {
     }
 
     // get the number of bytes contained by data segment
-    fread(&data_length, sizeof(int), 1, file);  // 4 bytes
+    // fread(&data_length, sizeof(int), 1, file);  // 4 bytes
+    read_uint32(&data_length, sizeof(int), 1, file);
+
+    // let's make a safe bet here and say we'll need at least data_length bytes.
+    // we can drop this later
+    track_events = calloc(data_length, sizeof(size_t));
 
     // here's where the fun begins
     // we need to run through data_length bytes and extract events
 
     while (bytes_read < data_length) {
+
+        read_buf = 0;
+
+        event = calloc(1, sizeof(struct TrackEvent));
 
         timedelta = 0;
 
@@ -70,37 +135,98 @@ void read_track_events(FILE *file, struct Track *track) {
             bytes_read += fread(&read_buf, sizeof(char), 1, file);
 
             // thanks http://www.ccarh.org/courses/253/handout/vlv/
+            // also: http://www.ccarh.org/courses/253/handout/vlv/vlv.cpp
 
-            timedelta <<= (unsigned) 7;  // ignore the extra bit at the top of the value
-            timedelta |= (read_buf & (unsigned) 0x7F);
+            timedelta <<= 7u;  // ignore the extra bit at the top of the value
+            timedelta |= read_buf & 0x7Fu;
 
 
 
             // Keep reading until we've read the 0 bit
-        } while (read_buf & (unsigned) 0x7);
+        } while ((read_buf & (unsigned) 0x7F) > 0x80);
 
         event->td = timedelta;
 
         // status byte
 
-        fread(&event->status, sizeof(int), 1, file);
+        read_short(&event->status, sizeof(char), 2, file);
+        // fread(&event->status, sizeof(int), 1, file);
 
         // midi event
-        if (event->status <= 0xF0) {
+        if (event->status <= 0xF000) {
             // first byte is event specifier, second is
             event->event_type = midi;
-            int event_code = event->status >> 8;
+            int event_code = event->status >> 8u;
             // these two events only have one data byte
             if (event_code == 0xC || event_code == 0xD) {
-                fread(&event->data_bytes[1], sizeof(int), 1, file);
+                event->data = calloc(1, sizeof(int));
+                event->data_len = 2;
+                // TODO patch this little bit up. We'll need to calloc and drop it into data bytes
+                fread(&event->data[1], sizeof(int), 1, file);
             }
             else {
-                fread(event->data_bytes, sizeof(int), 2, file);
+                event->data = calloc(2, sizeof(int));
+                event->data_len = 4;
+                fread(event->data, sizeof(int), 2, file);
             }
         }
 
+        // meta events
+        else if (event->status >= 0xFF00) {
+
+            event->event_type = meta;
+            int event_status = event->status & 0xFFu;  // just pull off the last byte
+
+            if (event_status <= 8) {
+
+                // ones with text
+
+                event->data_len = read_vlv(file, &bytes_read);
+                event->data = calloc(event->data_len, sizeof(char));
+
+                bytes_read += fread(event->data, sizeof(char), event->data_len, file);
+                continue;
+            }
+
+            // all the other ones
+
+            switch (event_status) {
+
+                case 0x20:
+                    // midi channel prefix
+                    break;
+
+                case 0x2F:
+                    // end of track
+                    break;
+
+                case 0x51:
+                    // set tempo
+                    break;
+
+                case 0x54:
+                    // SMTPE offset
+                    break;
+
+                case 0x58:
+                    // time signature
+                    break;
+
+                case 0x59:
+                    // key signature
+                    break;
+
+                case 0x7F:
+                    // sequencer meta event
+                    break;
+
+                default:
+                    fprintf(stderr, "invalid meta event code");
 
 
+            }
+
+        }
 
     }
 
@@ -116,15 +242,12 @@ struct Track *create_track(int id) {
     return new_track;
 }
 
-// TODO MIDI IS BIG ENDIAN
-// this means that we'll need to perform a swap every time we try to read in a value
-
 /// read in a header chunk
 struct HeaderChunk *read_header_chunk(FILE *file) {
     // create a struct
     struct HeaderChunk *chunk = calloc(1, sizeof(struct HeaderChunk));
     char chunk_type[5];
-    int chunk_len;
+    unsigned chunk_len;
     // skip over the chunk type
     fread(chunk_type, sizeof(char), 4, file);
     chunk_type[4] = '\0';
@@ -137,13 +260,17 @@ struct HeaderChunk *read_header_chunk(FILE *file) {
     // skip the chunk length, this is guaranteed to be 6
     fread(&chunk_len, sizeof(int), 1, file);
 
+    chunk_len = __builtin_bswap32(chunk_len);
+
     // it's just 6 bytes
 
     // get midi file format
     fread(&chunk->format, sizeof(char), 2, file);
 
-    fread(&(chunk->n_tracks), sizeof(char), 2, file);
-    fread(&(chunk->division), sizeof(char), 2, file);
+    fread(&(chunk->n_tracks), sizeof(short), 1, file);
+    fread(&(chunk->division), sizeof(short), 1, file);
+    chunk->n_tracks = __builtin_bswap16(chunk->n_tracks);
+    chunk->division = __builtin_bswap16(chunk->division);
     // skip
 //    fseek(file, sizeof(char) * 4, SEEK_CUR);
 
