@@ -9,10 +9,34 @@ struct HeaderChunk {
     unsigned short division;
 };
 
-enum EventType{midi, meta, sysex};
+enum EventClass{midi, meta, sysex};
+
+enum EventType{
+    // meta events
+    me_seq_num = 0xFF00,  // auto register the rest
+    me_text,
+    me_copyright,
+    me_seq_name,
+    me_instr_name,
+    me_lyric,
+    me_marker,
+    me_cue_pt,
+    me_midi_chan_pfx = 0xFF20,
+    me_track_end = 0xFF2F,
+    me_set_tempo = 0xFF51,
+    me_smtpe_offset = 0xFF54,
+    me_time_sig = 0xFF58,
+    me_key_sig = 0xFF59,
+    me_sem_event = 0xFF7F,
+    // sys events
+    s_event = 0xF0,
+    s_escape = 0xF7,
+
+};
 
 struct TrackEvent {
     unsigned long td;  /// Timedelta offset before the current event
+    enum EventClass event_class;
     enum EventType event_type;
     unsigned short status;
     unsigned short event_code;
@@ -27,24 +51,53 @@ struct Track {
 };
 
 /// Read a big endian short and swap it
-void read_short(unsigned short *ptr, size_t size, size_t n, FILE *file) {
+size_t read_short(unsigned short *ptr, size_t size, size_t n, FILE *file) {
 
-    fread(ptr, size, n, file);
+    size_t bytes_read = 0;
+
+    bytes_read += fread(ptr, size, n, file);
     *ptr = __builtin_bswap16(*ptr);
+    return bytes_read;
 
 }
 
-void read_uint32(unsigned int *ptr, size_t size, size_t n, FILE *file) {
+size_t read_uint32(unsigned int *ptr, size_t size, size_t n, FILE *file) {
 
-    fread(ptr, size, n, file);
+    size_t bytes_read = 0;
+
+    bytes_read += fread(ptr, size, n, file);
     *ptr = __builtin_bswap32(*ptr);
+    return bytes_read;
 
 }
 
-void read_long(unsigned long *ptr, size_t size, size_t n, FILE *file) {
+size_t read_long(unsigned long *ptr, size_t size, size_t n, FILE *file) {
 
-    fread(ptr, size, n, file);
+    size_t bytes_read = 0;
+
+    bytes_read += fread(ptr, size, n, file);
     *ptr = __builtin_bswap64(*ptr);
+    return bytes_read;
+
+}
+
+/**
+ * Read in a given number of bytes in reverse order
+ * n_bytes: number of bytes to read in
+ * file: file to read from
+ * return: char pointer to little-endian
+ */
+char *read_arr(size_t n_bytes, FILE *file) {
+
+    char *arr = calloc(n_bytes, sizeof(char));
+
+    for (int i = n_bytes - 1; i >= 0; i--) {
+
+        fread(&arr[i], sizeof(char), 1, file);
+
+    }
+
+    return arr;
 
 }
 
@@ -91,6 +144,9 @@ void read_track_events(FILE *file, struct Track *track) {
 
     char chunk_type[5];
     int bytes_read = 0;
+    int cur_midi_prefix = -1;  // current active midi channel prefix
+    unsigned char cur_event_type;
+    unsigned char cur_event_class;
     unsigned int data_length;
     unsigned long timedelta;
     unsigned int read_buf;
@@ -109,11 +165,11 @@ void read_track_events(FILE *file, struct Track *track) {
 
     // get the number of bytes contained by data segment
     // fread(&data_length, sizeof(int), 1, file);  // 4 bytes
-    read_uint32(&data_length, sizeof(int), 1, file);
+    bytes_read += read_uint32(&data_length, sizeof(int), 1, file);
 
     // let's make a safe bet here and say we'll need at least data_length bytes.
     // we can drop this later
-    track_events = calloc(data_length, sizeof(size_t));
+    // track_events = calloc(data_length, sizeof(size_t));
 
     // here's where the fun begins
     // we need to run through data_length bytes and extract events
@@ -123,6 +179,10 @@ void read_track_events(FILE *file, struct Track *track) {
         read_buf = 0;
 
         event = calloc(1, sizeof(struct TrackEvent));
+
+
+        event->data_len = 0;
+        event->data = NULL;
 
         timedelta = 0;
 
@@ -149,75 +209,141 @@ void read_track_events(FILE *file, struct Track *track) {
 
         // status byte
 
-        read_short(&event->status, sizeof(char), 2, file);
+        // pull in event class
+        bytes_read += fread(&cur_event_class, sizeof(char), 1, file);
+
+        // have to pull sysex out early
+        if (cur_event_class == 0xF0 || cur_event_class == 0xF7) {
+
+            // sysex event
+            event->event_class = sysex;
+            event->data_len = read_vlv(file, &bytes_read);
+
+            read_arr(event->data_len, file);
+
+            continue;
+
+
+
+        }
+
+        bytes_read += fread(&cur_event_type, sizeof(char), 1, file);
+
+        // bring the values together
+        event->status = 0u | ((unsigned int) cur_event_class << 8u) | ((unsigned int) cur_event_type);
+
+
+
+
+        // read_short(&event->status, sizeof(char), 2, file);
+        unsigned char event_code = event->status >> 8u;  // first byte
         // fread(&event->status, sizeof(int), 1, file);
 
         // midi event
         if (event->status <= 0xF000) {
             // first byte is event specifier, second is
-            event->event_type = midi;
-            int event_code = event->status >> 8u;
+            event->event_class = midi;
             // these two events only have one data byte
             if (event_code == 0xC || event_code == 0xD) {
-                event->data = calloc(1, sizeof(int));
+                event->data = calloc(2, sizeof(char));
                 event->data_len = 2;
+                bytes_read += 2;
                 // TODO patch this little bit up. We'll need to calloc and drop it into data bytes
                 fread(&event->data[1], sizeof(int), 1, file);
             }
             else {
-                event->data = calloc(2, sizeof(int));
+                event->data = calloc(4, sizeof(char));
                 event->data_len = 4;
-                fread(event->data, sizeof(int), 2, file);
+                bytes_read += 4;
+                read_arr(event->data_len, file);
             }
         }
 
         // meta events
         else if (event->status >= 0xFF00) {
 
-            event->event_type = meta;
+            event->event_class = meta;
             int event_status = event->status & 0xFFu;  // just pull off the last byte
 
+            // ones with text
             if (event_status <= 8) {
-
-                // ones with text
-
                 event->data_len = read_vlv(file, &bytes_read);
                 event->data = calloc(event->data_len, sizeof(char));
 
                 bytes_read += fread(event->data, sizeof(char), event->data_len, file);
+
+                switch (event->status) {
+                    case (0xFF00):
+                        event->event_code = me_seq_num;
+                        break;
+
+                    case (0xFF01):
+                        event->event_code = me_text;
+                        break;
+
+                    case (0xFF02):
+                        event->event_code = me_copyright;
+                        break;
+                    case (0xFF03):
+                        event->event_code = me_seq_name;
+                        break;
+                    case (0xFF04):
+                        event->event_code = me_instr_name;
+                        break;
+                    case (0xFF05):
+                        event->event_code = me_lyric;
+                        break;
+                    case (0xFF06):
+                        event->event_code = me_marker;
+                        break;
+                    case (0xFF07):
+                        event->event_code = me_cue_pt;
+                        break;
+                    default:
+                        fprintf(stderr, "unknown event status");
+                }
+
                 continue;
             }
+
+            else if (event_status == 0x7F) {
+
+                // sequencer meta event
+
+            }
+
+            bytes_read += fread(&event->data_len, sizeof(char), 1, file);
+            bytes_read += event->data_len;
+
+            event->data = read_arr(event->data_len, file);
 
             // all the other ones
 
             switch (event_status) {
-
                 case 0x20:
-                    // midi channel prefix
+                    event->event_code = me_midi_chan_pfx;
                     break;
 
                 case 0x2F:
-                    // end of track
+                    event->event_code = me_track_end;
                     break;
 
                 case 0x51:
-                    // set tempo
+                    event->event_code = me_set_tempo;
                     break;
 
                 case 0x54:
-                    // SMTPE offset
+                    event->event_code = me_smtpe_offset;
                     break;
 
                 case 0x58:
                     // time signature
+                    event->event_code = me_time_sig;
                     break;
 
                 case 0x59:
+                    event->event_code = me_time_sig;
                     // key signature
-                    break;
-
-                case 0x7F:
-                    // sequencer meta event
                     break;
 
                 default:
@@ -225,6 +351,8 @@ void read_track_events(FILE *file, struct Track *track) {
 
 
             }
+
+
 
         }
 
