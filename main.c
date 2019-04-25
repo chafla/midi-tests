@@ -141,7 +141,7 @@ unsigned long read_vlv(FILE *file, int *bytes_read) {
 
 
         // Keep reading until we've read a 0 as the msb
-    } while (read_buf & 0x80u);
+    } while ((read_buf & 0x7Fu) > 0x80);
 
     return timedelta;
 }
@@ -228,22 +228,7 @@ void read_track_events(FILE *file, struct Track *track) {
         // it's formatted in a variable length, so the lower 7 bits are data.
         // a 0 in the msb of a byte (like 01111111) means that the byte is the last in a variable-length number
 
-        do {
-
-            bytes_read += fread(&read_buf, sizeof(char), 1, file);
-
-            // thanks http://www.ccarh.org/courses/253/handout/vlv/
-            // also: http://www.ccarh.org/courses/253/handout/vlv/vlv.cpp
-
-            timedelta <<= 7u;  // ignore the extra bit at the top of the value
-            timedelta |= read_buf & 0x7Fu;
-
-
-
-            // Keep reading until we've read the 0 bit
-        } while ((read_buf & 0x7Fu) > 0x80);
-
-        event->td = timedelta;
+        event->td = read_vlv(file, &bytes_read);
 
         // status byte
 
@@ -464,7 +449,6 @@ struct HeaderChunk *read_header_chunk(FILE *file) {
     chunk->n_tracks = __builtin_bswap16(chunk->n_tracks);
     chunk->division = __builtin_bswap16(chunk->division);
     // skip
-//    fseek(file, sizeof(char) * 4, SEEK_CUR);
 
     printf("Header information: n_tracks: %#x, division: %#x, format: %#x\n",
             chunk->n_tracks, chunk->division, chunk->format);
@@ -481,6 +465,7 @@ void print_track_events(struct Track *track) {
 
         printf("************\n");
         printf("Event %d:\n", i);
+        printf("Class: %d\n", cur_event->event_class);
         printf("td: %#lx\n", cur_event->td);
         printf("status: %#x\n", cur_event->status);
         printf("data:");
