@@ -47,6 +47,7 @@ struct TrackEvent {
 struct Track {
     int id;
     char *track_name;
+    unsigned int n_events;
     struct TrackEvent **events;
 };
 
@@ -101,6 +102,7 @@ char *read_arr(size_t n_bytes, FILE *file) {
 
 }
 
+/// Read a variable length value in and convert it to an unsigned long
 unsigned long read_vlv(FILE *file, int *bytes_read) {
     unsigned int read_buf = 0;
     unsigned long timedelta = 0;
@@ -140,8 +142,6 @@ unsigned long read_vlv(FILE *file, int *bytes_read) {
  */
 void read_track_events(FILE *file, struct Track *track) {
 
-    char vlv_timedelta[4];
-
     char chunk_type[5];
     int bytes_read = 0;
     int cur_midi_prefix = -1;  // current active midi channel prefix
@@ -152,7 +152,9 @@ void read_track_events(FILE *file, struct Track *track) {
     unsigned int read_buf;
 
     struct TrackEvent *event = NULL;
-    struct TrackEvent **track_events;
+    int event_capacity = 3000;
+    struct TrackEvent **track_events = calloc(event_capacity, sizeof(struct TrackEvent));
+    int cur_track_event = 0;
 
     // parse header
     fread(chunk_type, sizeof(char), 4, file);
@@ -179,6 +181,25 @@ void read_track_events(FILE *file, struct Track *track) {
         read_buf = 0;
 
         event = calloc(1, sizeof(struct TrackEvent));
+
+        // resize if we end up filling up too much
+        // not using realloc because it scares me
+        if (cur_track_event + 2 >= event_capacity) {
+            struct TrackEvent **new_events = calloc(event_capacity * 2, sizeof(struct TrackEvent));
+            for (int i = 0; i < event_capacity + 1; i++) {
+
+                new_events[i] = track_events[i];
+
+            }
+
+            free(track_events);
+
+            track_events = new_events;
+        }
+
+        track_events[cur_track_event] = event;
+        cur_track_event++;
+
 
 
         event->data_len = 0;
@@ -219,7 +240,12 @@ void read_track_events(FILE *file, struct Track *track) {
             event->event_class = sysex;
             event->data_len = read_vlv(file, &bytes_read);
 
-            read_arr(event->data_len, file);
+            event->data = read_arr(event->data_len, file);
+
+            if (cur_event_class == 0xF0)
+                event->event_type = s_event;
+            else
+                event->event_type = s_escape;
 
             continue;
 
@@ -303,12 +329,14 @@ void read_track_events(FILE *file, struct Track *track) {
                         fprintf(stderr, "unknown event status");
                 }
 
+
                 continue;
             }
 
             else if (event_status == 0x7F) {
 
                 // sequencer meta event
+                // TODO
 
             }
 
@@ -357,6 +385,9 @@ void read_track_events(FILE *file, struct Track *track) {
         }
 
     }
+
+    track->n_events = cur_track_event;
+    track->events = track_events;
 
 }
 
@@ -409,6 +440,27 @@ struct HeaderChunk *read_header_chunk(FILE *file) {
 
 }
 
+void print_track_events(struct Track *track) {
+
+    for (int i = 0; i < track->n_events; i++) {
+
+        struct TrackEvent *cur_event = track->events[i];
+
+        printf("************\n");
+        printf("Event %d:\n", i);
+        printf("td: %lX\n", cur_event->td);
+        printf("status: %X\n", cur_event->status);
+        printf("data:");
+        for (int j = 0; j < cur_event->data_len; j++) {
+            printf(" %x", cur_event->data[j] & 0xFF);
+        }
+        printf("\n");
+
+
+    }
+
+}
+
 // TODO track chunks hold onto all events of a given track
 // so the first track has all of its timedeltas and stuff in the first track chunk
 // this means that we'd want to load all messages for a specific track
@@ -434,6 +486,7 @@ int main() {
 
         tracks[i] = create_track(i);
         read_track_events(midi, tracks[i]);
+        print_track_events(tracks[i]);
 
         // now, we'll go through the rest of the midi file.
         // the structure is organized such that there are track chunks for every logical track in the file
@@ -444,6 +497,8 @@ int main() {
 
 
     printf("n_tracks: %d, division: %d\n", header->n_tracks, header->division);
+
+//    print_track_events()
 
     return 0;
 }
