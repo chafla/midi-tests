@@ -27,7 +27,7 @@ enum EventType{
     me_smtpe_offset = 0xFF54,
     me_time_sig = 0xFF58,
     me_key_sig = 0xFF59,
-    me_sem_event = 0xFF7F,
+    me_seq_m_event = 0xFF7F,
     // sys events
     s_event = 0xF0,
     s_escape = 0xF7,
@@ -180,7 +180,7 @@ void read_track_events(FILE *file, struct Track *track) {
 
     // get the number of bytes contained by data segment
     // fread(&data_length, sizeof(int), 1, file);  // 4 bytes
-    bytes_read += read_uint32(&data_length, sizeof(int), 1, file);
+    read_uint32(&data_length, sizeof(int), 1, file);
 
     // let's make a safe bet here and say we'll need at least data_length bytes.
     // we can drop this later
@@ -189,11 +189,12 @@ void read_track_events(FILE *file, struct Track *track) {
     // here's where the fun begins
     // we need to run through data_length bytes and extract events
 
-    while (bytes_read < data_length/* && !at_track_end*/) {
-
-        read_buf = 0;
+    while (bytes_read < data_length) {
 
         event = calloc(1, sizeof(struct TrackEvent));
+        event->data_len = 0;
+        event->data = NULL;
+
 
         // resize if we end up filling up too much
         // not using realloc because it scares me
@@ -218,11 +219,6 @@ void read_track_events(FILE *file, struct Track *track) {
         cur_track_event++;
 
 
-
-        event->data_len = 0;
-        event->data = NULL;
-
-        timedelta = 0;
 
         // read in the timedelta between the past event and the current event
         // it's formatted in a variable length, so the lower 7 bits are data.
@@ -268,15 +264,13 @@ void read_track_events(FILE *file, struct Track *track) {
             if (((cur_event_class & 0xC0u) == 0) || \
                     (cur_event_class & 0xD0u) == 0) {
 
-                event->data = calloc(1, sizeof(char));
-                event->data_len = 1;\
+                event->data_len = 1;
             }
 
             // these ones are two
             else {
-                event->data = calloc(2, sizeof(char));
+
                 event->data_len = 2;
-                bytes_read += 2;
             }
 
 
@@ -294,12 +288,9 @@ void read_track_events(FILE *file, struct Track *track) {
         // bring the values together
         event->status = 0u | ((unsigned int) cur_event_class << 8u) | ((unsigned int) cur_event_type);
 
-        // read_short(&event->status, sizeof(char), 2, file);
-        unsigned char event_code = event->status >> 8u;  // first byte
-        // fread(&event->status, sizeof(int), 1, file);
-
-
         if (event->status >= 0xFF00) {
+
+            // meta events
 
             event->event_class = meta;
             int event_status = event->status & 0xFFu;  // just pull off the last byte
@@ -307,10 +298,14 @@ void read_track_events(FILE *file, struct Track *track) {
             // ones with text
             if (event_status <= 8) {
                 event->data_len = read_vlv(file, &bytes_read);
-                event->data = calloc(event->data_len, sizeof(char));
-                bytes_read += event->data_len;
+                event->data = calloc(event->data_len + 1, sizeof(char));
 
-                fread(event->data, sizeof(char), event->data_len, file);
+                // interestingly, text is read in the correct endianness
+
+                bytes_read += fread(event->data, sizeof(char), event->data_len, file);
+
+                // null terminate for good measure
+                event->data[event->data_len] = '\0';
 
                 switch (event->status) {
                     case (0xFF00):
@@ -347,61 +342,70 @@ void read_track_events(FILE *file, struct Track *track) {
                 continue;
             }
 
+            // sequencer meta event
+            // pull this one out since it uses a VLV
             else if (event_status == 0x7F) {
 
                 // sequencer meta event
-                // TODO
+                event->data_len = read_vlv(file, &bytes_read);
+
+                event->data = read_arr(event->data_len, file);
+                bytes_read += event->data_len;
+
+                event->event_type = me_seq_m_event;
+
+                continue;
 
             }
 
-            bytes_read += fread(&event->data_len, sizeof(char), 1, file);
-            bytes_read += event->data_len;
+            else {
+                bytes_read += fread(&event->data_len, sizeof(char), 1, file);
 
-            event->data = read_arr(event->data_len, file);
+                event->data = read_arr(event->data_len, file);
+                bytes_read += event->data_len;
 
-            // all the other ones
+                // all the other ones
 
-            switch (event_status) {
-                case 0x20:
-                    event->event_code = me_midi_chan_pfx;
-                    break;
+                switch (event_status) {
+                    case 0x20:
+                        event->event_code = me_midi_chan_pfx;
+                        break;
 
-                case 0x2F:
-                    event->event_code = me_track_end;
-                    // Special case! This is the end of the track.
-                    // Let's assume that this marks the end of the current track, and
-                    // break out here.
-                    at_track_end = 1;
-                    break;
+                    case 0x2F:
+                        event->event_code = me_track_end;
+                        break;
 
-                case 0x51:
-                    event->event_code = me_set_tempo;
-                    break;
+                    case 0x51:
+                        event->event_code = me_set_tempo;
+                        break;
 
-                case 0x54:
-                    event->event_code = me_smtpe_offset;
-                    break;
+                    case 0x54:
+                        event->event_code = me_smtpe_offset;
+                        break;
 
-                case 0x58:
-                    // time signature
-                    event->event_code = me_time_sig;
-                    break;
+                    case 0x58:
+                        // time signature
+                        event->event_code = me_time_sig;
+                        break;
 
-                case 0x59:
-                    event->event_code = me_time_sig;
-                    // key signature
-                    break;
+                    case 0x59:
+                        event->event_code = me_time_sig;
+                        // key signature
+                        break;
 
-                default:
-                    fprintf(stderr, "invalid meta event code");
+                    default:
+                        fprintf(stderr, "invalid meta event code");
 
 
+                }
             }
-
-
 
         }
 
+    }
+
+    if (bytes_read != data_length) {
+        fprintf(stderr, "Discrepancy exists between bytes read and expected data length");
     }
 
     track->n_events = cur_track_event;
@@ -454,6 +458,46 @@ struct HeaderChunk *read_header_chunk(FILE *file) {
             chunk->n_tracks, chunk->division, chunk->format);
 
     return chunk;
+
+}
+
+/// free up all memory associated with the track itself
+void destroy_track(struct Track *track) {
+
+    struct TrackEvent *cur_event;
+
+    if (track->track_name != NULL) {
+
+        free(track->track_name);
+        track->track_name = NULL;
+    }
+
+    if (track->n_events > 0 && track->events != NULL) {
+
+        for (unsigned int i = 0; i < track->n_events; i++) {
+
+            cur_event = track->events[i];
+
+            if (track->events[i] != NULL) {
+
+                // destroy the events
+
+                if (cur_event->data) {
+                    free(cur_event->data);
+                    cur_event->data = NULL;
+                }
+
+                free(cur_event);
+
+            }
+
+        }
+
+    }
+
+    free(track->events);
+
+    free(track);
 
 }
 
@@ -516,11 +560,21 @@ int main() {
 
     }
 
-
-
     printf("n_tracks: %d, division: %d\n", header->n_tracks, header->division);
 
-//    print_track_events()
+
+    for (unsigned int i = 0; i < header->n_tracks; i++) {
+
+        if (tracks[i] != NULL) {
+            destroy_track(tracks[i]);
+        }
+
+    }
+
+    free(tracks);
+
+    free(header);
+
 
     return 0;
 }
