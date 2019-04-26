@@ -21,6 +21,8 @@ enum EventType{
     me_lyric,
     me_marker,
     me_cue_pt,
+    me_prog_name,
+    me_dev_name,
     me_midi_chan_pfx = 0xFF20,
     me_track_end = 0xFF2F,
     me_set_tempo = 0xFF51,
@@ -63,7 +65,7 @@ struct Track {
 };
 
 /// Read a big endian short and swap it
-size_t read_short(unsigned short *ptr, size_t size, size_t n, FILE *file) {
+size_t read_uint16(unsigned short *ptr, size_t size, size_t n, FILE *file) {
 
     size_t bytes_read = 0;
 
@@ -83,7 +85,7 @@ size_t read_uint32(unsigned int *ptr, size_t size, size_t n, FILE *file) {
 
 }
 
-size_t read_long(unsigned long *ptr, size_t size, size_t n, FILE *file) {
+size_t read_uint64(unsigned long *ptr, size_t size, size_t n, FILE *file) {
 
     size_t bytes_read = 0;
 
@@ -115,7 +117,7 @@ char *read_arr(size_t n_bytes, FILE *file) {
 
 /// Read a variable length value in and convert it to an unsigned long
 unsigned long read_vlv(FILE *file, int *bytes_read) {
-    unsigned int read_buf = 0;
+    unsigned short read_buf = 0;
     unsigned long timedelta = 0;
     int *bytes_counter;
 
@@ -130,18 +132,19 @@ unsigned long read_vlv(FILE *file, int *bytes_read) {
 
 
     do {
+        read_buf = 0;
 
         *bytes_counter += fread(&read_buf, sizeof(char), 1, file);
 
         // thanks http://www.ccarh.org/courses/253/handout/vlv/
 
         timedelta <<= 7u;  // ignore the extra bit at the top of the value
-        timedelta |= read_buf & 0x7Fu;
+        timedelta |= (read_buf & 0x7Fu);
 
 
 
         // Keep reading until we've read a 0 as the msb
-    } while ((read_buf & 0x7Fu) > 0x80);
+    } while ((read_buf) >= 0x80);
 
     return timedelta;
 }
@@ -157,7 +160,7 @@ void read_track_events(FILE *file, struct Track *track) {
     int bytes_read = 0;
     int cur_midi_prefix = -1;  // current active midi channel prefix
     unsigned char cur_event_type;
-    unsigned char cur_event_class;
+    unsigned char status_byte;
     unsigned int data_length;
     unsigned long timedelta;
     unsigned int read_buf;
@@ -195,6 +198,9 @@ void read_track_events(FILE *file, struct Track *track) {
         event->data_len = 0;
         event->data = NULL;
 
+        // skip past a null byte
+        // fseek(file, 1, SEEK_CUR);
+
 
         // resize if we end up filling up too much
         // not using realloc because it scares me
@@ -229,21 +235,21 @@ void read_track_events(FILE *file, struct Track *track) {
         // status byte
 
         // pull in event class
-        bytes_read += fread(&cur_event_class, sizeof(char), 1, file);
+        bytes_read += fread(&status_byte, sizeof(char), 1, file);
 
         // the first two only have one status byte, and a fixed length.
 
-        if (cur_event_class == 0xF0 || cur_event_class == 0xF7) {
+        if (status_byte == 0xF0 || status_byte == 0xF7) {
 
             // sysex event
-            event->status = cur_event_class;  // this is significantly shorter
+            event->status = status_byte;  // this is significantly shorter
             event->event_class = sysex;
             event->data_len = read_vlv(file, &bytes_read);
 
             event->data = read_arr(event->data_len, file);
             bytes_read += event->data_len;
 
-            if (cur_event_class == 0xF0)
+            if (status_byte == 0xF0)
                 event->event_type = s_event;
             else
                 event->event_type = s_escape;
@@ -255,14 +261,13 @@ void read_track_events(FILE *file, struct Track *track) {
         }
 
         // midi events
-        else if (cur_event_class < 0xF0) {
+        else if (0x80 <= status_byte && status_byte < 0xF0) {
             // first byte is event specifier
             event->event_class = midi;
-            event->status = cur_event_class;
+            event->status = status_byte;
 
             // these two events only have one data byte
-            if (((cur_event_class & 0xC0u) == 0) || \
-                    (cur_event_class & 0xD0u) == 0) {
+            if ((status_byte == 0xC0) || (status_byte == 0xD0)) {
 
                 event->data_len = 1;
             }
@@ -281,22 +286,29 @@ void read_track_events(FILE *file, struct Track *track) {
             continue;
         }
 
+        else if (status_byte < 0x80) {
+            fprintf(stderr, "Invalid status byte, skipping. ");
+            fprintf(stderr, "Event num: %d, status: %#x\n", cur_track_event - 1, status_byte);
+            event->event_class = 0;
+            event->status = event->status;
+        }
+
         // meta events
 
         bytes_read += fread(&cur_event_type, sizeof(char), 1, file);
 
         // bring the values together
-        event->status = 0u | ((unsigned int) cur_event_class << 8u) | ((unsigned int) cur_event_type);
+        event->status = 0u | ((unsigned int) status_byte << 8u) | ((unsigned int) cur_event_type);
 
         if (event->status >= 0xFF00) {
 
             // meta events
 
             event->event_class = meta;
-            int event_status = event->status & 0xFFu;  // just pull off the last byte
+            unsigned int event_type = event->status & 0xFFu;  // just pull off the last byte
 
             // ones with text
-            if (event_status <= 8) {
+            if (event_type < 8) {
                 event->data_len = read_vlv(file, &bytes_read);
                 event->data = calloc(event->data_len + 1, sizeof(char));
 
@@ -334,6 +346,16 @@ void read_track_events(FILE *file, struct Track *track) {
                     case (0xFF07):
                         event->event_code = me_cue_pt;
                         break;
+                    case (0xFF08):
+                        event->event_code = me_prog_name;
+                        break;
+                    case (0xFF09):
+                        event->event_code = me_dev_name;
+                        break;
+                    case (0xFF20):
+                        // TODO
+                        event->event_code = me_midi_chan_pfx;
+                        break;
                     default:
                         fprintf(stderr, "unknown event status");
                 }
@@ -344,7 +366,7 @@ void read_track_events(FILE *file, struct Track *track) {
 
             // sequencer meta event
             // pull this one out since it uses a VLV
-            else if (event_status == 0x7F) {
+            else if (event_type == 0x7F) {
 
                 // sequencer meta event
                 event->data_len = read_vlv(file, &bytes_read);
@@ -366,7 +388,7 @@ void read_track_events(FILE *file, struct Track *track) {
 
                 // all the other ones
 
-                switch (event_status) {
+                switch (event_type) {
                     case 0x20:
                         event->event_code = me_midi_chan_pfx;
                         break;
@@ -501,6 +523,21 @@ void destroy_track(struct Track *track) {
 
 }
 
+void print_event(struct TrackEvent *event) {
+
+    printf("Class: %d\n", event->event_class);
+    printf("td: %#lx\n", event->td);
+    printf("status: %#x\n", event->status);
+    printf("data:");
+    for (int j = 0; j < event->data_len; j++) {
+        printf(" %#x", event->data[j] & 0xFFu);
+
+    }
+    printf("\n");
+
+    printf("data (chars): %s\n", event->data);
+}
+
 void print_track_events(struct Track *track) {
 
     for (int i = 0; i < track->n_events; i++) {
@@ -509,17 +546,7 @@ void print_track_events(struct Track *track) {
 
         printf("************\n");
         printf("Event %d:\n", i);
-        printf("Class: %d\n", cur_event->event_class);
-        printf("td: %#lx\n", cur_event->td);
-        printf("status: %#x\n", cur_event->status);
-        printf("data:");
-        for (int j = 0; j < cur_event->data_len; j++) {
-            printf(" %#x", cur_event->data[j] & 0xFFu);
-
-        }
-        printf("\n");
-
-        printf("data (chars): %s\n", cur_event->data);
+        print_event(cur_event);
 
 
 
