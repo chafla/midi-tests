@@ -158,16 +158,10 @@ void read_track_events(FILE *file, struct Track *track) {
 
     char chunk_type[5];
     int bytes_read = 0;
-    int cur_midi_prefix = -1;  // current active midi channel prefix
     unsigned char cur_event_type;
     unsigned char status_byte;
     unsigned int data_length;
-    unsigned long timedelta;
-    unsigned int read_buf;
-
     unsigned int running_status = -1;
-
-    int at_track_end = 0;
 
     struct TrackEvent *event = NULL;
     int event_capacity = 3000;
@@ -269,9 +263,6 @@ void read_track_events(FILE *file, struct Track *track) {
 
             bytes_read += fread(event->data, sizeof(char), event->data_len, file);
 
-//            event->data = read_arr(event->data_len, file);
-//            bytes_read += event->data_len;
-
             if (status_byte == 0xF0)
                 event->event_type = s_event;
             else
@@ -301,13 +292,38 @@ void read_track_events(FILE *file, struct Track *track) {
                 event->data_len = 2;
             }
 
-            // TODO read_arr might have been a bad idea elsewhere
             // using read_arr here ended up reading data in incorrectly as they're separate values
             event->data = calloc(event->data_len, sizeof(char));
-            bytes_read += fread(event->data, sizeof(char), event->data_len, file);
-//            event->data = read_arr(event->data_len, file);
+            bytes_read += fread(event->data, sizeof(char), event->data_len, file);\
 
-            // TODO add enums here
+            switch (status_byte >> 4u) {
+
+                case (0x8):
+                    event->event_type = mi_off;
+                    break;
+                case (0x9):
+                    event->event_type = mi_on;
+                    break;
+                case (0xA):
+                    event->event_type = mi_pressure;
+                    break;
+                case (0xB):
+                    event->event_type = mi_cont_change;
+                    break;
+                case (0xC):
+                    event->event_type = mi_prog_change;
+                    break;
+                case (0xD):
+                    event->event_type = mi_key_pressure;
+                    break;
+                case (0xE):
+                    event->event_type = mi_pitch_bend;
+                    break;
+                default:
+                    fprintf(stderr, "invalid status byte.\n");
+                    break;
+            }
+
             continue;
         }
 
@@ -392,11 +408,7 @@ void read_track_events(FILE *file, struct Track *track) {
                 event->data_len = read_vlv(file, &bytes_read);
 
                 event->data = calloc(event->data_len, sizeof(char));
-
                 bytes_read += fread(event->data, sizeof(char), event->data_len, file);
-
-//                event->data = read_arr(event->data_len, file);
-//                bytes_read += event->data_len;
 
                 event->event_type = me_seq_m_event;
 
@@ -406,15 +418,10 @@ void read_track_events(FILE *file, struct Track *track) {
 
             else {
 
-
-
                 bytes_read += fread(&event->data_len, sizeof(char), 1, file);
 
                 event->data = calloc(event->data_len, sizeof(char));
                 bytes_read += fread(event->data, sizeof(char), event->data_len, file);
-
-//                event->data = read_arr(event->data_len, file);
-//                bytes_read += event->data_len;
 
                 // all the other ones
 
@@ -441,7 +448,7 @@ void read_track_events(FILE *file, struct Track *track) {
                         break;
 
                     case 0x59:
-                        event->event_code = me_time_sig;
+                        event->event_code = me_key_sig;
                         // key signature
                         break;
 
@@ -632,9 +639,14 @@ void print_track_events(struct Track *track) {
 // this means that we'd want to load all messages for a specific track
 // into a particular arrangement.
 
-int main() {
+int main(int argc, char *argv[]) {
 
-    FILE *file = fopen("PMD-Explorers of Sky MIDI RIP/004 - On The Beach At Dusk.mid", "rb");
+    if (argc != 2) {
+        printf("usage: main filename");
+        return EXIT_FAILURE;
+    }
+
+    FILE *file = fopen(argv[1], "rb");
     struct Track **tracks;
     if (!file) {
         perror("Error when loading file");
