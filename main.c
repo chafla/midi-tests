@@ -165,6 +165,8 @@ void read_track_events(FILE *file, struct Track *track) {
     unsigned long timedelta;
     unsigned int read_buf;
 
+    unsigned int running_status = -1;
+
     int at_track_end = 0;
 
     struct TrackEvent *event = NULL;
@@ -239,6 +241,23 @@ void read_track_events(FILE *file, struct Track *track) {
 
         // the first two only have one status byte, and a fixed length.
 
+        if (status_byte < 0x80) {
+            // we probably have a running status!
+            // https://web.archive.org/web/20130305092440/http://home.roadrunner.com/~jgglatt/tech/midispec/run.htm
+            // https://stackoverflow.com/questions/6886087/decoding-unknown-midi-events
+            fprintf(stderr, "Running status byte, it's rewind time ");
+            fprintf(stderr, "Event num: %d, status: %#x; ", cur_track_event - 1, status_byte);
+            fprintf(stderr, "cur file position: %#lx \n", ftell(file));
+
+
+            // move back by one byte, since it wasn't actually a status byte
+            fseek(file, -1, SEEK_CUR);
+            status_byte = running_status;
+        }
+
+        running_status = status_byte;
+
+
         if (status_byte == 0xF0 || status_byte == 0xF7) {
 
             // sysex event
@@ -246,8 +265,12 @@ void read_track_events(FILE *file, struct Track *track) {
             event->event_class = sysex;
             event->data_len = read_vlv(file, &bytes_read);
 
-            event->data = read_arr(event->data_len, file);
-            bytes_read += event->data_len;
+            event->data = calloc(event->data_len, sizeof(char));
+
+            bytes_read += fread(event->data, sizeof(char), event->data_len, file);
+
+//            event->data = read_arr(event->data_len, file);
+//            bytes_read += event->data_len;
 
             if (status_byte == 0xF0)
                 event->event_type = s_event;
@@ -267,7 +290,7 @@ void read_track_events(FILE *file, struct Track *track) {
             event->status = status_byte;
 
             // these two events only have one data byte
-            if ((status_byte == 0xC0) || (status_byte == 0xD0)) {
+            if (((status_byte & 0xCFu) == 0xC0u) || ((status_byte & 0xDFu) == 0xDFu)) {
 
                 event->data_len = 1;
             }
@@ -278,20 +301,17 @@ void read_track_events(FILE *file, struct Track *track) {
                 event->data_len = 2;
             }
 
-
-            event->data = read_arr(event->data_len, file);
-            bytes_read += event->data_len;
+            // TODO read_arr might have been a bad idea elsewhere
+            // using read_arr here ended up reading data in incorrectly as they're separate values
+            event->data = calloc(event->data_len, sizeof(char));
+            bytes_read += fread(event->data, sizeof(char), event->data_len, file);
+//            event->data = read_arr(event->data_len, file);
 
             // TODO add enums here
             continue;
         }
 
-        else if (status_byte < 0x80) {
-            fprintf(stderr, "Invalid status byte, skipping. ");
-            fprintf(stderr, "Event num: %d, status: %#x\n", cur_track_event - 1, status_byte);
-            event->event_class = 0;
-            event->status = event->status;
-        }
+
 
         // meta events
 
@@ -371,8 +391,12 @@ void read_track_events(FILE *file, struct Track *track) {
                 // sequencer meta event
                 event->data_len = read_vlv(file, &bytes_read);
 
-                event->data = read_arr(event->data_len, file);
-                bytes_read += event->data_len;
+                event->data = calloc(event->data_len, sizeof(char));
+
+                bytes_read += fread(event->data, sizeof(char), event->data_len, file);
+
+//                event->data = read_arr(event->data_len, file);
+//                bytes_read += event->data_len;
 
                 event->event_type = me_seq_m_event;
 
@@ -381,10 +405,16 @@ void read_track_events(FILE *file, struct Track *track) {
             }
 
             else {
+
+
+
                 bytes_read += fread(&event->data_len, sizeof(char), 1, file);
 
-                event->data = read_arr(event->data_len, file);
-                bytes_read += event->data_len;
+                event->data = calloc(event->data_len, sizeof(char));
+                bytes_read += fread(event->data, sizeof(char), event->data_len, file);
+
+//                event->data = read_arr(event->data_len, file);
+//                bytes_read += event->data_len;
 
                 // all the other ones
 
@@ -483,6 +513,40 @@ struct HeaderChunk *read_header_chunk(FILE *file) {
 
 }
 
+char *get_note(struct TrackEvent *event) {
+
+    char* note_ret = calloc(4, sizeof(char));
+    note_ret[0] = '\0';
+    note_ret[3] = '\0';
+
+    if (event->event_class != midi || event->status == 0 || event->status >= 0xA0u) {
+        return note_ret;
+    }
+
+
+    char *keys = "C#D#EF#G#A#B";
+
+    // get the scale, e.g. C[5]
+    // 0x3C is middle C (C4), so we want to offset from there
+    // ironically, C5 is 0xC (12) above.
+    int sharp = 0;
+    char scale = (event->data[0] / 12 - 1);     // number of scale, like the 5 in G5
+    char note = keys[event->data[0] % 12];  // actual note
+
+    if (note == '#') {
+        // pull one note flat
+        // haha this is awful
+        note = keys[event->data[0] % 12 - 1];
+        sharp = 1;
+    }
+
+
+
+    sprintf(note_ret, "%c%s%d", note, sharp ? "#" : "", scale);
+
+    return note_ret;
+}
+
 /// free up all memory associated with the track itself
 void destroy_track(struct Track *track) {
 
@@ -525,6 +589,8 @@ void destroy_track(struct Track *track) {
 
 void print_event(struct TrackEvent *event) {
 
+    char *note;
+
     printf("Class: %d\n", event->event_class);
     printf("td: %#lx\n", event->td);
     printf("status: %#x\n", event->status);
@@ -534,6 +600,13 @@ void print_event(struct TrackEvent *event) {
 
     }
     printf("\n");
+
+    if (event->event_class == midi) {
+        // inefficient hack
+        note = get_note(event);
+        printf("Note: %s\n", note);
+        free(note);
+    }
 
     printf("data (chars): %s\n", event->data);
 }
@@ -561,16 +634,17 @@ void print_track_events(struct Track *track) {
 
 int main() {
 
-    FILE *midi = fopen("PMD-Explorers of Sky MIDI RIP/002 - Top Menu Theme.mid", "rb");
+    FILE *file = fopen("PMD-Explorers of Sky MIDI RIP/004 - On The Beach At Dusk.mid", "rb");
     struct Track **tracks;
-    if (!midi) {
+    if (!file) {
         perror("Error when loading file");
         return EXIT_FAILURE;
     }
     struct HeaderChunk *header;
+    struct TrackEvent *event;
 
     // create header chunk
-    header = read_header_chunk(midi);
+    header = read_header_chunk(file);
 
     // create all the tracks that we will be using
     tracks = calloc(sizeof(size_t), header->n_tracks);
@@ -578,9 +652,26 @@ int main() {
     for (int i = 0; i < header->n_tracks; i++) {
 
         tracks[i] = create_track(i);
-        read_track_events(midi, tracks[i]);
+        if (tracks[i] == NULL)
+            continue;
+
+        read_track_events(file, tracks[i]);
         print_track_events(tracks[i]);
 
+        printf("Note data for track %d\n", i);
+
+        for (int j = 0; j < tracks[i]->n_events; j++) {
+            event = tracks[i]->events[j];
+            if (event->event_class == midi && ((event->status  == 0x92u))) {
+
+                printf(" %s", get_note(event));
+                if (event->td > 0)
+                    printf("\n");
+
+            }
+        }
+
+        printf("\n");
         // now, we'll go through the rest of the midi file.
         // the structure is organized such that there are track chunks for every logical track in the file
         // (think instruments).
