@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <byteswap.h>
 #include "track.h"
 
 // TODO track chunks hold onto all events of a given track
@@ -22,9 +21,12 @@ int main(int argc, char *argv[]) {
         perror("Error when loading file");
         return EXIT_FAILURE;
     }
+
     struct HeaderChunk *header;
     struct TrackEvent *event;
     char *note;
+    char **chords;
+    int pos;
 
     // create header chunk
     header = read_header_chunk(file);
@@ -39,23 +41,17 @@ int main(int argc, char *argv[]) {
             continue;
 
         read_track_events(file, tracks[i]);
-//        print_track_events(tracks[i]);
 
         printf("Note data for track %d\n", i);
 
         for (int j = 0; j < tracks[i]->n_events; j++) {
             event = tracks[i]->events[j];
-            if (event->event_class == midi && ((event->status  == 0x90u))) {
+            if (event->event_class == midi && ((event->status <= 0xA0u))) {
 
                 note = get_note(event);
+//                printf(" %s%d:%s", event->td > 0 ? "\n" : "", event->status & 0xFu, note);
                 printf(" %s", note);
                 free(note);
-/*
-
-                if (event->td > 0)
-                    printf("\n");
-*/
-
             }
         }
 

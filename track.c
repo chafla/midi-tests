@@ -3,6 +3,7 @@
 //
 
 #include "track.h"
+#include <byteswap.h>
 
 
 
@@ -60,9 +61,9 @@ void read_track_events(FILE *file, struct Track *track) {
 
     char chunk_type[5];
     int bytes_read = 0;
-    unsigned char cur_event_type;
-    unsigned char status_byte;
-    unsigned int data_length;
+    unsigned char cur_event_type = 0;
+    unsigned char status_byte = 0;
+    unsigned int data_length = 0;
     unsigned int running_status = -1;
 
     struct TrackEvent *event = NULL;
@@ -75,7 +76,7 @@ void read_track_events(FILE *file, struct Track *track) {
     chunk_type[4] = '\0';
 
     if (strcmp(chunk_type, "MTrk") != 0) {
-        printf("Invalid chunk type, found %s\n", chunk_type);
+        printf("Invalid chunk type for track %d, found %s\n", track->id, chunk_type);
         return;
     }
 
@@ -141,8 +142,9 @@ void read_track_events(FILE *file, struct Track *track) {
 
 
             // move back by one byte, since it wasn't actually a status byte
-            fseek(file, -1, SEEK_CUR);
+            fseek(file, -1L, SEEK_CUR);
             status_byte = running_status;
+            bytes_read--;
         }
 
         running_status = status_byte;
@@ -168,19 +170,19 @@ void read_track_events(FILE *file, struct Track *track) {
 
         }
 
-            // midi events
+        // midi events
         else if (0x80 <= status_byte && status_byte < 0xF0) {
             // first byte is event specifier
             event->event_class = midi;
             event->status = status_byte;
 
             // these two events only have one data byte
-            if (((status_byte & 0xCFu) == 0xC0u) || ((status_byte & 0xDFu) == 0xDFu)) {
+            if ((status_byte >> 4u == 0xCu) || ((status_byte >> 4u) == 0xDu)) {
 
                 event->data_len = 1;
             }
 
-                // these ones are two
+            // these ones are two
             else {
 
                 event->data_len = 2;
@@ -188,7 +190,7 @@ void read_track_events(FILE *file, struct Track *track) {
 
             // using read_arr here ended up reading data in incorrectly as they're separate values
             event->data = calloc(event->data_len, sizeof(char));
-            bytes_read += fread(event->data, sizeof(char), event->data_len, file);\
+            bytes_read += fread(event->data, sizeof(char), event->data_len, file);
 
             switch (status_byte >> 4u) {
 
@@ -322,8 +324,15 @@ void read_track_events(FILE *file, struct Track *track) {
                         event->event_type = me_midi_chan_pfx;
                         break;
 
+                    case (0x21):
+                        event->event_type = me_midi_port;
+                        break;
+
                     case 0x2F:
                         event->event_type = me_track_end;
+                        if (data_length != bytes_read) {
+                            fprintf(stderr, "Track end event reached with more bytes to go.\n");
+                        }
                         break;
 
                     case 0x51:
@@ -345,7 +354,7 @@ void read_track_events(FILE *file, struct Track *track) {
                         break;
 
                     default:
-                        fprintf(stderr, "invalid meta event code");
+                        fprintf(stderr, "invalid meta event code\n");
 
 
                 }
@@ -356,7 +365,7 @@ void read_track_events(FILE *file, struct Track *track) {
     }
 
     if (bytes_read != data_length) {
-        fprintf(stderr, "Discrepancy exists between bytes read and expected data length");
+        fprintf(stderr, "Discrepancy exists between bytes read and expected data length\n");
     }
 
     track->n_events = cur_track_event;

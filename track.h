@@ -17,7 +17,7 @@ struct HeaderChunk {
 
 enum EventClass {
     midi,
-    meta, 
+    meta,
     sysex
 };
 
@@ -34,6 +34,7 @@ enum EventType {
     me_prog_name,
     me_dev_name,
     me_midi_chan_pfx = 0xFF20,
+    me_midi_port,
     me_track_end = 0xFF2F,
     me_set_tempo = 0xFF51,
     me_smtpe_offset = 0xFF54,
@@ -58,20 +59,19 @@ enum EventType {
 };
 
 struct TrackEvent {
-    unsigned long td;  /// Timedelta offset before the current event
-    enum EventClass event_class;
-    enum EventType event_type;
-    unsigned short status;
-    unsigned short event_code;
-    char* data;  /// Data of the message - represented in bytes
-    unsigned int data_len;
+    unsigned long td;              /// Timedelta offset before the current event
+    enum EventClass event_class;   /// Overarching event class
+    enum EventType event_type;     /// More specific event type, subclass
+    unsigned short status;         /// status byte of the event
+    char* data;                    /// Data of the message - represented in bytes
+    unsigned int data_len;         /// Number of bytes in data
 };
 
 struct Track {
-    int id;
-    char *track_name;
-    unsigned int n_events;
-    struct TrackEvent **events;
+    int id;                        /// Track number. Always 1 in a type 1 midi file
+    char *track_name;              /// Possible track name.
+    unsigned int n_events;         /// number of track events
+    struct TrackEvent **events;    /// pointer to all track events
 };
 
 
